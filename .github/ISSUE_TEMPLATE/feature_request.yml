@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a focused improvement to Hours Time Tracker
+title: "Feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Describe the user problem before proposing a solution. Do not include real work records, credentials, or confidential employer information.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is difficult today, and who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What observable behavior would solve the problem?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: impact
+    attributes:
+      label: Privacy and maintenance impact
+      description: Does this affect local data, network access, migrations, packaging, or long-term support?
+    validations:
+      required: true

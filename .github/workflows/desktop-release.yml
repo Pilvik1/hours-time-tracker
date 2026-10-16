@@ -1,0 +1,237 @@
+name: Build Hours Time Tracker Windows release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-release.yml"
+      - "backend/**"
+      - "desktop/**"
+      - "frontend/**"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build and verify Windows artifacts
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/pyproject.toml
+            backend/build-requirements.txt
+
+      - name: Install desktop dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit desktop build dependencies
+        run: npm audit --audit-level=high
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Install backend and packager
+        run: python -m pip install -e "backend[dev]" -r backend/build-requirements.txt
+
+      - name: Audit production dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev
+
+      - name: Validate backend
+        run: |
+          ruff format --check backend
+          ruff check backend
+          pytest backend/tests --cov=time_tracker --cov-report=term-missing --cov-fail-under=75
+
+      - name: Validate and build desktop frontend
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm test
+          npm run lint
+          npm run build:desktop
+
+      - name: Build bundled backend
+        run: python -m PyInstaller --noconfirm --clean --distpath backend-dist --workpath build/pyinstaller backend/hours-backend.spec
+
+      - name: Smoke-test bundled backend and restart persistence
+        shell: pwsh
+        run: |
+          $token = "ci-desktop-token-with-sufficient-entropy"
+          $port = 18765
+          $database = Join-Path $env:RUNNER_TEMP "hours-release.sqlite3"
+          $databaseUrl = "sqlite+pysqlite:///" + ($database -replace '\\', '/')
+          $stdout = Join-Path $env:RUNNER_TEMP "hours-backend.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "hours-backend.stderr.log"
+          $frontendStdout = Join-Path $env:RUNNER_TEMP "hours-frontend.stdout.log"
+          $frontendStderr = Join-Path $env:RUNNER_TEMP "hours-frontend.stderr.log"
+          $headers = @{ "x-hours-desktop-token" = $token }
+          $frontendToken = "ci-frontend-token-with-sufficient-entropy"
+          $frontendPort = 18766
+
+          function Start-HoursBackend {
+            $env:DATABASE_URL = $databaseUrl
+            $env:HOURS_BACKEND_HOST = "127.0.0.1"
+            $env:HOURS_BACKEND_PORT = "$port"
+            $env:TIME_TRACKER_DESKTOP_API_TOKEN = $token
+            $env:TIME_TRACKER_SESSION_SECRET = "ci-session-secret-with-at-least-thirty-two-characters"
+            return Start-Process -FilePath "backend-dist/hours-backend/hours-backend.exe" -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          }
+
+          function Wait-HoursBackend($process) {
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if ($process.HasExited) { throw "Bundled backend exited early with code $($process.ExitCode)" }
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
+                if ($health.status -eq "ok" -and $health.storage -eq "sqlite" -and $health.desktop_auth) { return }
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            throw "Bundled backend did not become healthy"
+          }
+
+          $backend = Start-HoursBackend
+          try {
+            Wait-HoursBackend $backend
+            $unauthorized = Invoke-WebRequest -Uri "http://127.0.0.1:$port/api/settings" -TimeoutSec 2 -SkipHttpErrorCheck
+            if ($unauthorized.StatusCode -ne 401) { throw "Protected API unexpectedly returned HTTP $($unauthorized.StatusCode) without the desktop token" }
+            Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/settings" -Headers $headers -TimeoutSec 2 | Out-Null
+
+            $env:API_INTERNAL_URL = "http://127.0.0.1:$port"
+            $env:HOST = "127.0.0.1"
+            $env:PORT = "$frontendPort"
+            $env:TIME_TRACKER_DESKTOP_FRONTEND_TOKEN = $frontendToken
+            $frontend = Start-Process -FilePath "node" -ArgumentList "frontend/.output/server/index.mjs" -PassThru -WindowStyle Hidden -RedirectStandardOutput $frontendStdout -RedirectStandardError $frontendStderr
+            try {
+              for ($attempt = 0; $attempt -lt 60; $attempt++) {
+                if ($frontend.HasExited) { throw "Production frontend exited early with code $($frontend.ExitCode)" }
+                try {
+                  $frontendHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$frontendPort/healthz" -TimeoutSec 2
+                  if ($frontendHealth.status -eq "ok") { break }
+                } catch {
+                  Start-Sleep -Milliseconds 500
+                }
+              }
+              $blockedFrontend = Invoke-WebRequest -Uri "http://127.0.0.1:$frontendPort/" -TimeoutSec 2 -SkipHttpErrorCheck
+              if ($blockedFrontend.StatusCode -ne 401) { throw "Local frontend accepted a request without its desktop session" }
+              $frontendHeaders = @{ Cookie = "hours_desktop_session=$frontendToken" }
+              $overview = Invoke-WebRequest -Uri "http://127.0.0.1:$frontendPort/overview" -Headers $frontendHeaders -TimeoutSec 5 -SkipHttpErrorCheck
+              if ($overview.StatusCode -ne 200) { throw "Production frontend overview returned HTTP $($overview.StatusCode)" }
+              $auth = Invoke-RestMethod -Uri "http://127.0.0.1:$frontendPort/api/auth/status" -Headers $frontendHeaders -TimeoutSec 2
+              if (-not $auth.authenticated) { throw "Production frontend did not authenticate through the backend proxy" }
+            } finally {
+              Stop-Process -Id $frontend.Id -Force -ErrorAction SilentlyContinue
+            }
+            $timer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/timer/start" -Headers $headers -ContentType "application/json" -Body '{"description":"Release persistence test"}'
+          } finally {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          $backend = Start-HoursBackend
+          try {
+            Wait-HoursBackend $backend
+            $restored = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/timer" -Headers $headers -TimeoutSec 2
+            if (-not $restored.running -or $restored.entry_id -ne $timer.entry_id) {
+              throw "Timer did not survive backend restart"
+            }
+            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/timer/stop" -Headers $headers -ContentType "application/json" -Body '{}' | Out-Null
+          } finally {
+            Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+            Write-Host "Bundled backend stdout:"
+            Get-Content $stdout -ErrorAction SilentlyContinue
+            Write-Host "Bundled backend stderr:"
+            Get-Content $stderr -ErrorAction SilentlyContinue
+            Write-Host "Production frontend stdout:"
+            Get-Content $frontendStdout -ErrorAction SilentlyContinue
+            Write-Host "Production frontend stderr:"
+            Get-Content $frontendStderr -ErrorAction SilentlyContinue
+          }
+
+      - name: Package installer and portable app
+        run: npx electron-builder --publish never
+
+      - name: Stage and checksum release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-upload | Out-Null
+          $executables = Get-ChildItem release -File -Filter "*.exe"
+          if ($executables.Count -lt 2) { throw "Expected installer and portable executable" }
+          Copy-Item -Path $executables.FullName -Destination release-upload
+          $checksums = foreach ($file in (Get-ChildItem release-upload -File -Filter "*.exe" | Sort-Object Name)) {
+            $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          Set-Content -Path "release-upload/SHA256SUMS.txt" -Value $checksums -Encoding utf8
+          $safeRef = "${{ github.ref_name }}" -replace '[^A-Za-z0-9._-]', '-'
+          Compress-Archive -Path (Get-ChildItem release-upload -File -Filter "*.exe").FullName -DestinationPath "release-upload/Hours-$safeRef-Windows.zip" -Force
+
+      - name: Cache release assets for the publish job
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: release-upload
+          key: hours-release-${{ github.sha }}
+          enableCrossOsArchive: true
+
+  release:
+    name: Publish GitHub prerelease
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source for SBOM
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore Windows release assets
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: release-upload
+          key: hours-release-${{ github.sha }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-upload/hours-source.spdx.json
+          upload-artifact: false
+
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: release-upload/*

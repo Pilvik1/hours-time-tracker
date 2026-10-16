@@ -1,0 +1,67 @@
+{
+  "name": "hours-time-tracker-desktop",
+  "version": "0.1.0-beta.4",
+  "private": true,
+  "description": "A local-first personal time tracker for Windows.",
+  "author": "Håkon Pilvik",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://github.com/Pilvik1/hours-time-tracker#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pilvik1/hours-time-tracker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Pilvik1/hours-time-tracker/issues"
+  },
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:build:desktop": "npm --prefix frontend run build:desktop",
+    "desktop:pack": "npm run frontend:build:desktop && electron-builder --dir",
+    "desktop:dist": "npm run frontend:build:desktop && electron-builder --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.8.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.github.pilvik1.hourstimetracker",
+    "productName": "Hours",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "frontend/.output/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend-dist/hours-backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "extraMetadata": {
+      "main": "desktop/main.cjs"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Hours.Setup.${version}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "Hours.${version}.Portable.${ext}"
+    }
+  }
+}
