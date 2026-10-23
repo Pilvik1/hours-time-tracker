@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hours-time-tracker-backend"
-version = "0.1.0b4"
+version = "0.1.0b5"
 description = "Local-first single-user time tracking API"
 readme = "README.md"
 license = "AGPL-3.0-only"

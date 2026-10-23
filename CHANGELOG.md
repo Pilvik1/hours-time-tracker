@@ -4,6 +4,14 @@ All notable changes are documented here. This project follows Semantic Versionin
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-10-23
+
+### Changed
+
+- Replaced the generic clock artwork with an original Hours “H” clock mark
+- Updated the browser favicon, in-app brand mark, README artwork, and Windows application icon as one consistent asset set
+- Updated Vite and audit-remediated development dependencies to clear newly disclosed build-tool vulnerabilities
+
 ## [0.1.0-beta.4] - 2026-10-16
 
 Public-readiness release from a sanitized source snapshot.
